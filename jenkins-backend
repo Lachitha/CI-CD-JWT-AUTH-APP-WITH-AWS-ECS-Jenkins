@@ -1,0 +1,91 @@
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'node22'
+    }
+
+    environment {
+        SCANNER_HOME = tool 'sonar'
+        AWS_REGION = 'ap-south-1' // Define your AWS region
+        ECR_REPO = 'public.ecr.aws/f2e9k9h7/node' // Define your ECR repository URL
+        registryCredential = 'aws' // Define your Jenkins credentials ID for ECR
+        cluster = "nodeECS"
+        service = "nodeECS-Service"
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Lachitha/JWT-AUTH-APP.git'
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                dir('backend') {
+                    sh "npm install"
+                }
+            }
+        }
+        stage('Unit Test') {
+            steps {
+                dir('backend') {
+                    sh "npm test"
+                }
+            }
+        }
+        stage('Trivy FS Scan') {
+            steps {
+                dir('backend') {
+                    sh "trivy fs --format table -o fs-report.html ."
+                }
+            }
+        }
+        stage('SonarQube') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                    dir('backend') {
+                        sh '$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectKey=Authenbackend -Dsonar.projectName=Authenbackend'
+                    }
+                }
+            }
+        }
+        stage('Docker Build & Tag') {
+            steps {
+                dir('backend') {
+                    script {
+                       dockerImage = docker.build("${ECR_REPO}:${BUILD_NUMBER}", ".")
+                    }
+                }
+            }
+        }
+        stage('Trivy Image Scan') {
+            steps {
+                sh "trivy image --format table -o image-report.html ${ECR_REPO}:latest"
+            }
+        }
+stage('Push Image to ECR') {
+    steps {
+        script {
+            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws']]) {
+                sh '''
+                aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/f2e9k9h7
+                '''
+                 dockerImage.push("$BUILD_NUMBER")
+                dockerImage.push('latest')
+            }
+        }
+    }
+}
+
+     stage('Deploy to ECS') {
+          steps {
+            withAWS(credentials: 'aws', region: 'ap-south-1') {
+            sh 'aws ecs update-service --cluster ${cluster} --service ${service} --force-new-deployment'
+        }
+      }
+     }
+     
+    }
+}
+
